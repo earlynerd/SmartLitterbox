@@ -1,148 +1,117 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "PetKitApi.h"
-#include <vector>
 
 #define GRAMS_PER_POUND 453.592f
+
+// --- WiFi and Petkit Credentials ---
 const char *ssid = "your-ssid-here";
 const char *password = "your-password-here";
 
 const char *petkit_username = "your-username-here";
 const char *petkit_password = "your-petkit-login-here";
-const char *petkit_region = "us";                    // e.g., "us", "eu"
-const char *petkit_timezone = "America/Los_Angeles"; // e.g., "America/New_York"
+const char *petkit_region = "us"; // e.g., "us", "eu"
 
+// --- Time Configuration ---
+// Find your timezone string here: https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
+const char *petkit_timezone = "America/Los_Angeles"; 
 const char *ntpServer = "pool.ntp.org";
-const char *tzInfo = "PST8PDT,M3.2.0,M11.1.0";		//will need updating to your POSIX coded timezone. 
+// This POSIX string must match your timezone. It's used for correct local time conversion.
+const char *tzInfo = "PST8PDT,M3.2.0,M11.1.0"; // POSIX timezone string for America/Los_Angeles
 
+// Initialize the PetKitApi object
 PetKitApi petkit(petkit_username, petkit_password, petkit_region, petkit_timezone);
 
-// A simple struct to hold a single data point
-struct DataPoint {
-    float x;
-    float y;
-};
-
-time_t convertToTimestamp(const String &dateStr, const String &timeStr)
-{
-  // 1. Create a tm structure to hold the parts of the date and time.
-  struct tm tm;
-
-  // 2. Combine the strings and parse them using sscanf.
-  String datetimeStr = dateStr + " " + timeStr;
-
-  // sscanf is a C function to parse formatted strings.
-  // It reads the values directly into the tm struct members.
-  sscanf(datetimeStr.c_str(), "%d-%d-%d %d:%d:%d",
-         &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-         &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
-
-  // 3. IMPORTANT: Adjust the year and month to match the tm struct's format.
-  // tm_year is years since 1900
-  tm.tm_year -= 1900;
-  // tm_mon is months since January (0-11)
-  tm.tm_mon -= 1;
-
-  // 4. Convert the tm structure into a single timestamp number.
-  return mktime(&tm);
-}
-
-
-void setup()
-{
+void setup() {
   Serial.begin(115200);
+  Serial.println("\nPetkit Library Example");
 
+  // --- Connect to WiFi ---
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("\nConnected to WiFi");
 
-  Serial.println("Synchronizing time with NTP server...");
-  configTzTime(tzInfo, ntpServer, ntpServer);
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 15000))		// 15-second timeout for NTP
-  { 
-    Serial.println("[Time Sync] System time synced via NTP.");
-    setenv("TZ", tzInfo, 1);
-    tzset();
-  }
-  time_t now;
-  while (now < 8 * 3600 * 2)
-  {
-    delay(500);
-    Serial.print(".");
-    now = time(nullptr);
-  }
-  Serial.println();
+  // Enable debug logging from the library for detailed output. quite verbose...
+  //petkit.setDebug(true);
 
-  Serial.print("Current time: ");
-  Serial.print(asctime(&timeinfo));
+  // --- Sync Time ---
+  // The library now handles NTP time synchronization. This is required before login.
+  if (!petkit.syncTime(ntpServer, tzInfo)) {
+    Serial.println("Time sync failed! Halting.");
+    while(1) delay(1000);
+  }
 
-  if (petkit.login())
-  {
+  // --- Login and Fetch Data ---
+  if (petkit.login()) {
     Serial.println("\nLogin successful! Fetching data...");
-    petkit.getDevices();
-
-    int pet_count = 0;
-    Pet *pets = petkit.getPets(pet_count);
-    if (pets != nullptr)
-    {
-      Serial.printf("Found %d pets:\n", pet_count);
-      for (int i = 0; i < pet_count; i++)
-      {
-        Serial.printf(" - Pet ID: %d, Name: %s\n", pets[i].id, pets[i].name.c_str());
+    
+    // fetchAllData() gets devices, pets, and historical records in one call
+    if (petkit.fetchAllData(30)) { // Get records for the last 30 days
+      
+      // --- Get Pet Information ---
+      const auto& pets = petkit.getPets();
+      Serial.printf("\nFound %zu pets:\n", pets.size());
+      for (const auto& pet : pets) {
+        Serial.printf(" - Pet ID: %d, Name: %s\n", pet.id, pet.name.c_str());
       }
-    }
-    // --- Fetch records for the last 30 days ---
-    Serial.println("\nFetching litterbox records for the last 30 days...");
-    petkit.getLitterboxWeightData(30);
 
-    int record_count = 0;
-    LitterboxRecord *records = petkit.getRecords(record_count);
-    std::vector<DataPoint> petRecords[pet_count];
+      // --- Get Latest Litterbox Status ---
+      StatusRecord latest_status = petkit.getLatestStatus();
+      if (latest_status.device_name != "") {
+        char timeStr[32];
+        // Use localtime() to convert the Unix timestamp to a human-readable format
+        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M", localtime(&latest_status.timestamp));
+        Serial.println("\n--- Latest Status ---");
+        Serial.printf("Device: %s\n", latest_status.device_name.c_str());
+        Serial.printf("Time: %s\n", timeStr);
+        Serial.printf("Litter Level: %d%%\n", latest_status.litter_percent);
+        Serial.printf("Waste Box Full: %s\n", latest_status.box_full ? "Yes" : "No");
+        Serial.printf("Litter Low: %s\n", latest_status.sand_lack ? "Yes" : "No");
+        Serial.println("---------------------");
+      }
 
-    if (records != nullptr)
-    {
-      Serial.printf("\nFound %d litterbox records:\n", record_count);
-      for (int i = 0; i < pet_count; i++)
-      {
-        std::vector<DataPoint> thisPetData;
-        int thisPetID = pets[i].id;
-        String thisPetName = pets[i].name;
-        for (int j = 0; j < record_count; j++)
-        {
-          time_t stamp = convertToTimestamp(records[j].date, records[j].time);
-          if (records[j].pet_id == thisPetID)
-          {
-            float weight = (float)records[j].weight_grams / (float)GRAMS_PER_POUND;
-            petRecords[i].push_back({(float)stamp, weight});
-            Serial.print(stamp);
-            Serial.print(", ");
-            Serial.print(thisPetName);
-            Serial.print(", ");
-            Serial.println(weight, 2);
-          }
+      // --- Get Historical Records ---
+      // The old way iterated through all records at once.
+      // The new, improved way below separates records by pet.
+      Serial.println("\n--- Historical Records by Pet ---");
+      for (const auto& pet : pets) {
+        Serial.printf("\n--- Records for %s (ID: %d) ---\n", pet.name.c_str(), pet.id);
+        
+        // Use the new helper function to get a vector of records just for this pet
+        std::vector<LitterboxRecord> pet_records = petkit.getLitterboxRecordsByPetId(pet.id);
+
+        if (pet_records.empty()) {
+            Serial.println("No records found for this pet in the last 30 days.");
+            continue;
+        }
+
+        // Now, loop through the filtered list for this specific pet
+        for (const auto& record : pet_records) {
+            float weight_lbs = (float)record.weight_grams / GRAMS_PER_POUND;
+            char timeStr[32];
+            strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M", localtime(&record.timestamp));
+
+            Serial.printf("[%s] Weight: %.2f lbs, Duration: %d sec\n",
+              timeStr,
+              weight_lbs,
+              record.duration_seconds
+            );
         }
       }
-     
+
+    } else {
+      Serial.println("Failed to fetch data.");
     }
-    else
-    {
-      Serial.println("No litterbox records found.");
-    }
-  }
-  else
-  {
-    Serial.println("\nLogin failed. Please check the serial monitor for detailed error messages.");
+  } else {
+    Serial.println("\nLogin failed. Please check credentials and serial monitor for detailed error messages.");
   }
 }
 
-void loop()
-{
-
+void loop() {
   // Nothing to do here
 }
+
