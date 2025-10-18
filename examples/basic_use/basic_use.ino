@@ -3,7 +3,7 @@
 #include "PetKitApi.h"
 #include <vector>
 
-
+#define GRAMS_PER_POUND 453.592f
 const char *ssid = "your-ssid-here";
 const char *password = "your-password-here";
 
@@ -17,6 +17,11 @@ const char *tzInfo = "PST8PDT,M3.2.0,M11.1.0";		//will need updating to your POS
 
 PetKitApi petkit(petkit_username, petkit_password, petkit_region, petkit_timezone);
 
+// A simple struct to hold a single data point
+struct DataPoint {
+    float x;
+    float y;
+};
 
 time_t convertToTimestamp(const String &dateStr, const String &timeStr)
 {
@@ -65,7 +70,7 @@ void setup()
     setenv("TZ", tzInfo, 1);
     tzset();
   }
-
+  time_t now;
   while (now < 8 * 3600 * 2)
   {
     delay(500);
