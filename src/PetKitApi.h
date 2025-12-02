@@ -2,6 +2,7 @@
 #define PetKitApi_h
 
 #include "Arduino.h"
+#include "SmartLitterbox.h" // Include the interface
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <vector>
@@ -34,9 +35,38 @@ struct StatusRecord {
     bool sand_lack;
 };
 
-class PetKitApi {
+class PetKitApi  : public SmartLitterbox {
 public:
     PetKitApi(const char* username, const char* password, const char* region, const char* timezone, int led = -1);
+
+    // Adapter: Convert internal Pet struct to Unified SL_Pet
+    std::vector<SL_Pet> getUnifiedPets() const override {
+        std::vector<SL_Pet> unified;
+        for (const auto& p : _pets) {
+            SL_Pet slp;
+            slp.id = String(p.id); // Convert int ID to String
+            slp.name = p.name;
+            slp.weight_lbs = 0.0; // Petkit "Pet" list doesn't strictly track current weight in the same way
+            unified.push_back(slp);
+        }
+        return unified;
+    }
+
+    // Adapter: Convert internal LitterboxRecord to Unified SL_Record
+    std::vector<SL_Record> getUnifiedRecords() const override {
+        std::vector<SL_Record> unified;
+        for (const auto& r : _litterbox_records) {
+            SL_Record slr;
+            slr.pet_name = r.pet_name;
+            slr.timestamp = r.timestamp;
+            slr.weight_lbs = r.weight_grams * 0.00220462; // Convert Grams to Lbs
+            slr.duration_seconds = (float)r.duration_seconds;
+            slr.action = "Visit";
+            slr.source_device = r.device_type;
+            unified.push_back(slr);
+        }
+        return unified;
+    }
 
     // --- Quality of Life Improvements ---
     
@@ -135,4 +165,3 @@ private:
 };
 
 #endif
-
