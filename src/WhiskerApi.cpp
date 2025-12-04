@@ -10,6 +10,10 @@ const char* API_PET_GRAPHQL = "https://pet-profile.iothings.site/graphql";
 WhiskerApi::WhiskerApi(const char* email, const char* password, const char* timezone) 
     : _email(email), _password(password), _timezone(timezone), _debug(false) {}
 
+WhiskerApi::~WhiskerApi()
+{
+
+}
 void WhiskerApi::setDebug(bool enabled) {
     _debug = enabled;
 }
@@ -18,18 +22,6 @@ void WhiskerApi::_log(const String& msg) {
     if (_debug && Serial) Serial.println("[WhiskerApi] " + msg);
 }
 
-// --- Time Sync (Crucial for SSL) ---
-bool WhiskerApi::syncTime(const char* ntpServer, const char* tzInfo) {
-    _log("Syncing time...");
-    configTzTime(tzInfo, ntpServer);
-    struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 10000)) {
-        _log("Time sync failed.");
-        return false;
-    }
-    _log("Time synced.");
-    return true;
-}
 
 // --- Authentication ---
 bool WhiskerApi::login() {
@@ -55,16 +47,19 @@ bool WhiskerApi::login() {
     http.begin(COGNITO_ENDPOINT);
     http.addHeader("Content-Type", "application/x-amz-json-1.1");
     http.addHeader("X-Amz-Target", "AWSCognitoIdentityProviderService.InitiateAuth");
+    http.setTimeout(10000); // 10s timeout
 
     int httpCode = http.POST(payload);
-    String response = http.getString();
-    http.end();
-
+    
     if (httpCode != 200) {
         _log("Login Failed: " + String(httpCode));
-        _log("Response: " + response);
+        if (httpCode > 0) _log("Response: " + http.getString());
+        http.end();
         return false;
     }
+
+    String response = http.getString();
+    http.end();
 
     JsonDocument respDoc;
     deserializeJson(respDoc, response);
@@ -91,15 +86,30 @@ bool WhiskerApi::_parseJwtForUserId(const String& token) {
     if (firstDot == -1 || secondDot == -1) return false;
 
     String payload = token.substring(firstDot + 1, secondDot);
-    unsigned char decoded[payload.length()];
-    size_t olen;
-    mbedtls_base64_decode(decoded, payload.length(), &olen, (unsigned char*)payload.c_str(), payload.length() );
-    //String decoded = base64::decode(payload);
-    String decode_output(decoded, olen);
-    JsonDocument doc;
-    deserializeJson(doc, decode_output);
     
-    if (doc["mid"]) {
+    size_t len = payload.length();
+    size_t olen = 0;
+    
+    unsigned char* decoded = (unsigned char*)malloc(len + 1);
+    if (!decoded) {
+        _log("Memory allocation failed for JWT decode");
+        return false;
+    }
+
+    int ret = mbedtls_base64_decode(decoded, len, &olen, (unsigned char*)payload.c_str(), len);
+    
+    if (ret != 0) {
+        free(decoded);
+        return false;
+    }
+
+    String decode_output((char*)decoded, olen);
+    free(decoded); 
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, decode_output);
+    
+    if (!error && doc["mid"]) {
         _user_id = doc["mid"].as<String>();
         return true;
     }
@@ -109,26 +119,25 @@ bool WhiskerApi::_parseJwtForUserId(const String& token) {
 // --- Main Data Fetch ---
 bool WhiskerApi::fetchAllData(int limit) {
     if (_id_token == "") {
-        _log("Not logged in.");
-        return false;
+        if (!login()) return false;
     }
     
     _pets.clear();
     _records.clear();
+    _status_records.clear(); // Clear old status info
 
-    // 1. Fetch Pets
+    //Fetch Pets
     _fetchPets();
 
-    // 2. For each Pet, fetch their specific weight history (SmartScale data)
-    // This answers your question: This is how we get data "separated per pet"
+    //For each Pet, fetch their specific weight history
     for (const auto& pet : _pets) {
         _fetchPetWeightHistory(pet, limit);
     }
 
-    // 3. Fetch Robot Cycles (Generic data like "Clean Cycle Completed")
+    //Fetch Robot Cycles and Status
     _fetchRobotsAndCycles(limit);
 
-    // 4. Sort all records by timestamp (descending)
+    //Sort all records by timestamp (descending)
     std::sort(_records.begin(), _records.end(), [](const WhiskerRecord &a, const WhiskerRecord &b) {
         return a.timestamp > b.timestamp;
     });
@@ -137,12 +146,12 @@ bool WhiskerApi::fetchAllData(int limit) {
 }
 
 void WhiskerApi::_fetchPets() {
-    // GraphQL to get pets
     String query = "query GetPetsByUser($userId: String!) { getPetsByUser(userId: $userId) { petId name weight } }";
     String vars = "{\"userId\":\"" + _user_id + "\"}";
     
     String response = _sendGraphQL(API_PET_GRAPHQL, query, vars);
-    
+    if (response == "{}") return;
+
     JsonDocument doc;
     deserializeJson(doc, response);
     JsonArray arr = doc["data"]["getPetsByUser"].as<JsonArray>();
@@ -158,11 +167,11 @@ void WhiskerApi::_fetchPets() {
 }
 
 void WhiskerApi::_fetchPetWeightHistory(const WhiskerPet& pet, int limit) {
-    // GraphQL to get specific history for a pet
     String query = "query GetWeightHistory($petId: String!, $limit: Int) { getWeightHistoryByPetId(petId: $petId, limit: $limit) { weight timestamp } }";
     String vars = "{\"petId\":\"" + pet.id + "\", \"limit\":" + String(limit) + "}";
 
     String response = _sendGraphQL(API_PET_GRAPHQL, query, vars);
+    if (response == "{}") return;
 
     JsonDocument doc;
     deserializeJson(doc, response);
@@ -172,13 +181,12 @@ void WhiskerApi::_fetchPetWeightHistory(const WhiskerPet& pet, int limit) {
         WhiskerRecord r;
         r.pet_id = pet.id;
         r.pet_name = pet.name;
-        r.event_type = "Pet Weight Recorded"; // This event implies a visit
-        r.device_model = "Litter-Robot 4";    // Only LR4 supports this
+        r.event_type = "Pet Weight Recorded"; 
+        r.device_model = "Litter-Robot 4";    
         r.weight_lbs = item["weight"].as<float>();
         
-        // Parse ISO8601 Timestamp (e.g., 2024-04-17T12:35:42.000Z)
         const char* ts = item["timestamp"];
-        struct tm tm;
+        struct tm tm = {0};
         strptime(ts, "%Y-%m-%dT%H:%M:%S", &tm);
         r.timestamp = mktime(&tm);
 
@@ -187,49 +195,73 @@ void WhiskerApi::_fetchPetWeightHistory(const WhiskerPet& pet, int limit) {
 }
 
 void WhiskerApi::_fetchRobotsAndCycles(int limit) {
-    // 1. Get LR4 Serial Numbers
-    String query = "query GetLR4($userId: String!) { getLitterRobot4ByUser(userId: $userId) { serial name } }";
+    //Fetch status fields (litterLevel, DFI, etc)
+    String query = "query GetLR4($userId: String!) { getLitterRobot4ByUser(userId: $userId) { serial name litterLevel DFILevelPercent isDFIFull robotStatus } }";
     String vars = "{\"userId\":\"" + _user_id + "\"}";
     String response = _sendGraphQL(API_LR4_GRAPHQL, query, vars);
+    if (response == "{}") return;
 
     JsonDocument doc;
     deserializeJson(doc, response);
     JsonArray robots = doc["data"]["getLitterRobot4ByUser"].as<JsonArray>();
 
-    // 2. For each robot, fetch generic activity
     for (JsonObject robot : robots) {
         String serial = robot["serial"].as<String>();
-        String name = robot["name"].as<String>();
+        
+        //CAPTURE CURRENT STATUS ---
+        WhiskerStatus status;
+        status.device_serial = serial;
+        status.device_model = "Litter-Robot 4";
+        status.timestamp = time(nullptr);
+        status.robot_status = robot["robotStatus"].as<String>();
+        
+        // Waste Level (DFI)
+        status.waste_level_percent = robot["DFILevelPercent"].as<int>();
+        status.is_drawer_full = robot["isDFIFull"].as<bool>();
 
+        // Litter Level Calculation (Raw mm to %)
+        // Based on logic: 100 - (raw_mm - 440) / 0.6
+        // 440mm = Full, ~500mm = Empty
+        int rawLitter = robot["litterLevel"].as<int>();
+        if (rawLitter > 0) {
+            float calc = 100.0 - ((float)(rawLitter - 440) / 0.6);
+            if (calc < 0) calc = 0;
+            if (calc > 100) calc = 100;
+            status.litter_level_percent = (int)round(calc);
+        } else {
+            status.litter_level_percent = 0; // Unknown/Error
+        }
+
+        _status_records.push_back(status);
+        _log("Status fetched for " + status.device_serial + ": Litter " + String(status.litter_level_percent) + "%");
+
+        // --- FETCH HISTORY ---
         String actQuery = "query GetActivity($serial: String!, $limit: Int) { getLitterRobot4Activity(serial: $serial, limit: $limit) { timestamp value actionValue } }";
         String actVars = "{\"serial\":\"" + serial + "\", \"limit\":" + String(limit) + "}";
         
         String actResp = _sendGraphQL(API_LR4_GRAPHQL, actQuery, actVars);
+        if (actResp == "{}") continue;
+
         JsonDocument actDoc;
         deserializeJson(actDoc, actResp);
         JsonArray activities = actDoc["data"]["getLitterRobot4Activity"].as<JsonArray>();
 
         for (JsonObject act : activities) {
             String val = act["value"].as<String>();
-            
-            // We skip "catWeight" here because we already fetched the clean, 
-            // separated data from _fetchPetWeightHistory.
-            // We only want machine events here.
             if (val == "catWeight") continue;
 
             WhiskerRecord r;
             r.device_serial = serial;
             r.device_model = "Litter-Robot 4";
-            r.pet_id = ""; // Generic event
+            r.pet_id = ""; 
             r.pet_name = "";
             
-            // Map common statuses
             if (val == "robotCycleStatusIdle") r.event_type = "Clean Cycle Complete";
             else if (val == "DFIFullFlagOn") r.event_type = "Drawer Full";
             else r.event_type = val;
 
             const char* ts = act["timestamp"];
-            struct tm tm;
+            struct tm tm = {0};
             strptime(ts, "%Y-%m-%d %H:%M:%S", &tm);
             r.timestamp = mktime(&tm);
 
@@ -238,8 +270,14 @@ void WhiskerApi::_fetchRobotsAndCycles(int limit) {
     }
 }
 
+// Auto-retry on 401 Unauthorized
 String WhiskerApi::_sendRequest(const char* url, const char* method, const String& payload, const char* contentType) {
+    if (WiFi.status() != WL_CONNECTED) return "{}";
+
     HTTPClient http;
+    http.setTimeout(15000); 
+    http.setReuse(false); 
+
     http.begin(url);
     http.addHeader("Content-Type", contentType);
     if (_id_token.length() > 0) {
@@ -250,11 +288,33 @@ String WhiskerApi::_sendRequest(const char* url, const char* method, const Strin
     if (String(method) == "POST") httpCode = http.POST(payload);
     else httpCode = http.GET();
 
+    // Check for Token Expiry (401)
+    if (httpCode == 401) {
+        _log("Token expired. Attempting re-login...");
+        http.end(); 
+        
+        if (login()) {
+            _log("Re-login successful. Retrying request...");
+            http.begin(url);
+            http.addHeader("Content-Type", contentType);
+            http.addHeader("Authorization", "Bearer " + _id_token);
+            
+            if (String(method) == "POST") httpCode = http.POST(payload);
+            else httpCode = http.GET();
+        } else {
+            _log("Re-login failed.");
+            return "{}";
+        }
+    }
+
     if (httpCode > 0) {
         String res = http.getString();
         http.end();
         return res;
+    } else {
+        _log("Request failed: " + http.errorToString(httpCode));
     }
+    
     http.end();
     return "{}";
 }
@@ -270,17 +330,4 @@ String WhiskerApi::_sendGraphQL(const char* url, const String& query, const Stri
     String payload;
     serializeJson(doc, payload);
     return _sendRequest(url, "POST", payload);
-}
-
-const std::vector<WhiskerPet>& WhiskerApi::getPets() const { return _pets; }
-const std::vector<WhiskerRecord>& WhiskerApi::getRecords() const { return _records; }
-
-std::vector<WhiskerRecord> WhiskerApi::getRecordsByPetId(String pet_id) const {
-    std::vector<WhiskerRecord> filtered;
-    for (const auto& rec : _records) {
-        if (rec.pet_id == pet_id) {
-            filtered.push_back(rec);
-        }
-    }
-    return filtered;
 }

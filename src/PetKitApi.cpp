@@ -1,7 +1,7 @@
 #include "PetKitApi.h"
 #include "mbedtls/md5.h"
 #include <WiFi.h>
-#include <algorithm> // For std::sort and std::max_element
+#include <algorithm> 
 
 String md5(String str)
 {
@@ -28,59 +28,28 @@ PetKitApi::PetKitApi(const char *username, const char *password, const char *reg
       _region(region),
       _timezone(timezone),
       _ledpin(led),
-      _debug(false) // Debugging is off by default
+      _debug(false) 
 {
     _base_url = "https://passport.petkt.com";
-    if (_ledpin > 0)
-    {
-        pinMode(_ledpin, OUTPUT);
-    }
+    if (_ledpin > 0) pinMode(_ledpin, OUTPUT);
 }
 
-// --- Quality of Life Methods ---
-
-void PetKitApi::_log(const char *message)
+PetKitApi::~PetKitApi()
 {
-    if (_debug && Serial)
-    {
-        Serial.println(message);
-    }
+    
 }
 
-void PetKitApi::_log(const String &message)
-{
-    if (_debug && Serial)
-    {
-        Serial.println(message);
-    }
+void PetKitApi::_log(const char *message) {
+    if (_debug && Serial) Serial.println(message);
 }
 
-void PetKitApi::setDebug(bool enabled)
-{
+void PetKitApi::_log(const String &message) {
+    if (_debug && Serial) Serial.println(message);
+}
+
+void PetKitApi::setDebug(bool enabled) {
     _debug = enabled;
 }
-
-bool PetKitApi::syncTime(const char *ntpServer, const char *tzInfo)
-{
-    _log("Synchronizing time...");
-    configTzTime(tzInfo, ntpServer);
-
-    struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 10000))
-    { // 10-second timeout
-        _log("Failed to obtain time from NTP server.");
-        return false;
-    }
-    setenv("TZ", tzInfo, 1);
-    tzset();
-    _log("Time synchronized successfully.");
-    char timeStr[64];
-    strftime(timeStr, sizeof(timeStr), "%A, %B %d %Y %H:%M:%S", &timeinfo);
-    _log(String("Current local time: ") + timeStr);
-    return true;
-}
-
-// --- Core API Methods ---
 
 bool PetKitApi::login()
 {
@@ -89,18 +58,16 @@ bool PetKitApi::login()
         _log("Error: WiFi not connected. Cannot log in.");
         return false;
     }
-    if (time(nullptr) < 8 * 3600 * 2)
+    // Safety check: Time MUST be synced for PetKit signatures to work
+    if (time(nullptr) < 1000000) // Rough check for valid epoch
     {
-        _log("Error: Time is not set. Please call syncTime() before login().");
+        _log("Error: System time invalid. Ensure NTP is synced.");
         return false;
     }
 
-    if (!_getBaseUrl())
-    {
-        return false;
-    }
-    if (_ledpin > 0)
-        digitalWrite(_ledpin, !digitalRead(_ledpin));
+    if (!_getBaseUrl()) return false;
+    
+    if (_ledpin > 0) digitalWrite(_ledpin, !digitalRead(_ledpin));
 
     _log("Attempting to log in...");
     JsonDocument client_nfo;
@@ -112,6 +79,7 @@ bool PetKitApi::login()
     client_nfo["version"] = "12.4.1";
     client_nfo["timezoneId"] = _timezone;
     client_nfo["timezone"] = _getTimezoneOffset();
+    
     String client_nfo_str;
     serializeJson(client_nfo, client_nfo_str);
 
@@ -126,11 +94,11 @@ bool PetKitApi::login()
 
     if (response == "")
     {
-        _log("Login request failed. No response from server.");
+        _log("Login request failed.");
         return false;
     }
-    if (_ledpin > 0)
-        digitalWrite(_ledpin, !digitalRead(_ledpin));
+    
+    if (_ledpin > 0) digitalWrite(_ledpin, !digitalRead(_ledpin));
 
     JsonDocument result;
     DeserializationError error = deserializeJson(result, response);
@@ -138,7 +106,6 @@ bool PetKitApi::login()
     if (error)
     {
         _log(String("Login JSON parsing failed: ") + error.c_str());
-        _log("Response was: " + response);
         return false;
     }
 
@@ -150,13 +117,7 @@ bool PetKitApi::login()
     }
     else
     {
-        _log("Login failed. Please check credentials and region.");
-        if (_debug)
-        {
-            _log("Server response:");
-            serializeJsonPretty(result, Serial);
-            Serial.println();
-        }
+        _log("Login failed.");
         return false;
     }
 }
@@ -165,8 +126,8 @@ bool PetKitApi::fetchAllData(int days_back)
 {
     if (_session_id == "")
     {
-        _log("Error: Not logged in. Please call login() first.");
-        return false;
+        _log("Not logged in. Attempting login...");
+        if (!login()) return false;
     }
     _getDevices();
     _parsePets();
@@ -176,42 +137,23 @@ bool PetKitApi::fetchAllData(int days_back)
 
 // --- Data Accessors ---
 
-const std::vector<Pet> &PetKitApi::getPets() const
-{
-    return _pets;
-}
-
-const std::vector<LitterboxRecord> &PetKitApi::getLitterboxRecords() const
-{
-    return _litterbox_records;
-}
-
-const std::vector<StatusRecord> &PetKitApi::getStatusRecords() const
-{
-    return _status_records;
-}
+const std::vector<Pet> &PetKitApi::getPets() const { return _pets; }
+const std::vector<LitterboxRecord> &PetKitApi::getLitterboxRecords() const { return _litterbox_records; }
+const std::vector<StatusRecord> &PetKitApi::getStatusRecords() const { return _status_records; }
 
 std::vector<LitterboxRecord> PetKitApi::getLitterboxRecordsByPetId(int pet_id) const
 {
     std::vector<LitterboxRecord> pet_records;
-    // This efficiently iterates through all records and copies only the ones matching the pet's ID.
     for (const auto &record : _litterbox_records)
     {
-        if (record.pet_id == pet_id)
-        {
-            pet_records.push_back(record);
-        }
+        if (record.pet_id == pet_id) pet_records.push_back(record);
     }
     return pet_records;
 }
 
 StatusRecord PetKitApi::getLatestStatus() const
 {
-    if (_status_records.empty())
-    {
-        return StatusRecord{}; // Return an empty record if none exist
-    }
-    // Records are pre-sorted, so the first one is the latest
+    if (_status_records.empty()) return StatusRecord{}; 
     return _status_records.front();
 }
 
@@ -239,12 +181,7 @@ bool PetKitApi::_getBaseUrl()
 {
     _log("Getting regional server URL...");
     String response = _sendRequest("/v1/regionservers", "", false);
-
-    if (response == "")
-    {
-        _log("Failed to get region servers list.");
-        return false;
-    }
+    if (response == "") return false;
 
     JsonDocument doc;
     deserializeJson(doc, response);
@@ -261,34 +198,24 @@ bool PetKitApi::_getBaseUrl()
 
         if (serverName == _region || serverId == _region)
         {
-            if (gateway.endsWith("/"))
-            {
-                gateway.remove(gateway.length() - 1);
-            }
+            if (gateway.endsWith("/")) gateway.remove(gateway.length() - 1);
             _base_url = gateway;
             _region = server["id"].as<String>();
             _log(String("Found regional server: ") + _base_url);
             return true;
         }
     }
-    _log("Error: Your region was not found in the server list.");
+    _log("Error: Your region was not found.");
     return false;
 }
 
 void PetKitApi::_getDevices()
 {
-    if (_ledpin > 0)
-        digitalWrite(_ledpin, !digitalRead(_ledpin));
     _log("Fetching device list...");
     String response = _sendRequest("/group/family/list", "", false);
     if (response != "")
     {
         deserializeJson(_device_doc, response);
-        _log("Device list fetched.");
-    }
-    else
-    {
-        _log("Failed to fetch device list.");
     }
 }
 
@@ -307,7 +234,6 @@ void PetKitApi::_parsePets()
             _pets.push_back(p);
         }
     }
-    _log(String("Found ") + _pets.size() + " pets.");
 }
 
 void PetKitApi::_getLitterboxData(int days_back)
@@ -330,7 +256,7 @@ void PetKitApi::_getLitterboxData(int days_back)
             }
         }
     }
-    // Sort records by timestamp, descending (newest first)
+    // Sort records
     std::sort(_litterbox_records.begin(), _litterbox_records.end(), [](const LitterboxRecord &a, const LitterboxRecord &b)
               { return a.timestamp > b.timestamp; });
     std::sort(_status_records.begin(), _status_records.end(), [](const StatusRecord &a, const StatusRecord &b)
@@ -348,14 +274,20 @@ void PetKitApi::_fetchHistoricalData(JsonObject device, int days_back)
     String deviceType = device["deviceType"].as<String>();
     deviceType.toLowerCase();
 
-    _log(String("\nFetching records for device: ") + device["deviceName"].as<const char *>() + " (" + deviceId + ", type: " + deviceType + ")");
+    _log(String("Fetching records for ") + device["deviceName"].as<String>());
 
     JsonDocument doc;
 
     for (int i = 0; i < days_back; i++)
     {
-        if (_ledpin > 0)
-            digitalWrite(_ledpin, !digitalRead(_ledpin));
+        // SAFETY: Yield to OS/Watchdog to prevent crashes during long loops
+        delay(50); 
+        if (WiFi.status() != WL_CONNECTED) {
+            _log("WiFi lost during sync. Aborting.");
+            break;
+        }
+
+        if (_ledpin > 0) digitalWrite(_ledpin, !digitalRead(_ledpin));
 
         char date_str_ymd[9];
         strftime(date_str_ymd, sizeof(date_str_ymd), "%Y%m%d", &p_tm);
@@ -366,68 +298,62 @@ void PetKitApi::_fetchHistoricalData(JsonObject device, int days_back)
 
         String response = _sendRequest(endpoint, payload_str, true, true);
 
+        // Clear document to prevent merging old data
+        doc.clear(); 
         DeserializationError error = deserializeJson(doc, response);
+        
         if (error)
         {
-            _log(String("Failed to parse records for date ") + date_str_ymd + ": " + error.c_str());
-            p_tm.tm_mday -= 1;
-            mktime(&p_tm);
-            continue;
+            _log(String("Failed to parse records for ") + date_str_ymd);
+            // Don't continue/break, just ensure we decrement day
         }
-
-        JsonArray records = doc.as<JsonArray>();
-        if (!records.isNull() && records.size() > 0)
+        else 
         {
-            _log(String("Found ") + records.size() + " records for " + date_str_ymd);
+            JsonArray records = doc.as<JsonArray>();
+            for (JsonObject record : records)
+            {
+                if (!record["enumEventType"]) continue;
+
+                time_t record_ts = record["timestamp"].as<long>();
+                // Basic validation
+                if (!record["petId"] || !record["content"]) continue;
+
+                LitterboxRecord lr;
+                lr.device_name = device["deviceName"].as<String>();
+                lr.device_type = deviceType;
+                lr.pet_id = record["petId"].as<int>();
+                lr.pet_name = record["petName"].as<String>();
+                lr.timestamp = record_ts;
+
+                if (record["content"])
+                {
+                    lr.weight_grams = record["content"]["petWeight"].as<int>();
+                    long time_in = record["content"]["timeIn"].as<long>();
+                    long time_out = record["content"]["timeOut"].as<long>();
+                    lr.duration_seconds = (time_out > time_in) ? (time_out - time_in) : 0;
+                }
+                _litterbox_records.push_back(lr);
+
+                if (record["subContent"])
+                {
+                    StatusRecord sr;
+                    sr.device_name = device["deviceName"].as<String>();
+                    sr.device_type = deviceType;
+                    sr.timestamp = record_ts;
+                    JsonArray subContent = record["subContent"];
+                    sr.litter_percent = subContent[0]["content"]["litterPercent"].as<int>();
+                    sr.box_full = subContent[0]["content"]["boxFull"].as<bool>();
+                    sr.sand_lack = subContent[0]["content"]["sandLack"].as<bool>();
+                    _status_records.push_back(sr);
+                }
+            }
         }
 
-        for (JsonObject record : records)
-        {
-            if (!record["enumEventType"])
-                continue;
-
-            time_t record_ts = record["timestamp"].as<long>();
-            if (!record["petId"] || record["petId"].isNull() || !record["content"] || record["content"].isNull())
-                continue;
-            LitterboxRecord lr;
-            lr.device_name = device["deviceName"].as<String>();
-            lr.device_type = deviceType;
-            lr.pet_id = record["petId"].as<int>();
-            lr.pet_name = record["petName"].as<String>();
-            lr.timestamp = record_ts;
-
-            if (record["content"])
-            {
-                lr.weight_grams = record["content"]["petWeight"].as<int>();
-                long time_in = record["content"]["timeIn"].as<long>();
-                long time_out = record["content"]["timeOut"].as<long>();
-                lr.duration_seconds = (time_out > time_in) ? (time_out - time_in) : 0;
-            }
-            _litterbox_records.push_back(lr);
-
-            if (record["subContent"])
-            {
-                StatusRecord sr;
-                sr.device_name = device["deviceName"].as<String>();
-                sr.device_type = deviceType;
-                sr.timestamp = record_ts;
-                JsonArray subContent = record["subContent"];
-                sr.litter_percent = subContent[0]["content"]["litterPercent"].as<int>();
-                sr.box_full = subContent[0]["content"]["boxFull"].as<bool>();
-                sr.sand_lack = subContent[0]["content"]["sandLack"].as<bool>();
-                _status_records.push_back(sr);
-            }
-
-            // }
-        }
-
+        // Decrement day
         p_tm.tm_mday -= 1;
-        mktime(&p_tm);
+        mktime(&p_tm); // Normalize date (handles month rollovers)
 
-        if (deviceType == "t5" || deviceType == "t6")
-        {
-            break; // These devices return all data at once, no need to iterate days
-        }
+        if (deviceType == "t5" || deviceType == "t6") break; 
     }
 }
 
@@ -440,27 +366,15 @@ String PetKitApi::_urlEncode(const String &str)
     for (unsigned int i = 0; i < str.length(); i++)
     {
         c = str.charAt(i);
-        if (c == ' ')
-        {
-            encodedString += '+';
-        }
-        else if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
-        {
-            encodedString += c;
-        }
+        if (c == ' ') encodedString += '+';
+        else if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') encodedString += c;
         else
         {
             code1 = (c & 0xf) + '0';
-            if ((c & 0xf) > 9)
-            {
-                code1 = (c & 0xf) - 10 + 'A';
-            }
+            if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
             c = (c >> 4) & 0xf;
             code0 = c + '0';
-            if (c > 9)
-            {
-                code0 = c - 10 + 'A';
-            }
+            if (c > 9) code0 = c - 10 + 'A';
             encodedString += '%';
             encodedString += code0;
             encodedString += code1;
@@ -471,72 +385,58 @@ String PetKitApi::_urlEncode(const String &str)
 
 String PetKitApi::_sendRequest(const String &url, const String &payload, bool isPost, bool isFormUrlEncoded)
 {
+    if (WiFi.status() != WL_CONNECTED) return "";
+
     HTTPClient http;
     String finalUrl = _base_url + url;
-
-    if (_debug)
-    {
-        _log("--------------------");
-        _log("Requesting URL: " + finalUrl);
-    }
+    
+    // Set timeout to prevent blocking indefinitely
+    http.setTimeout(10000); 
 
     http.begin(finalUrl);
-
     http.addHeader("Accept", "*/*");
     http.addHeader("X-Api-Version", "12.4.1");
     http.addHeader("X-Client", "android(15.1;23127PN0CG)");
     http.addHeader("User-Agent", "okhttp/3.12.11");
-    if (_session_id != "")
-    {
-        http.addHeader("X-Session", _session_id);
-    }
+    
+    if (_session_id != "") http.addHeader("X-Session", _session_id);
 
-    if (isPost)
-    {
+    if (isPost && isFormUrlEncoded) {
         http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    } else if (isPost) {
+         http.addHeader("Content-Type", "application/json");
     }
 
     int httpCode;
-    if (isPost)
-    {
-        if (_debug)
-        {
-            _log("Method: POST");
-            if (payload != "")
-                _log("Payload: " + payload);
-        }
-        httpCode = http.POST(payload);
-    }
-    else
-    {
-        if (_debug)
-            _log("Method: GET");
-        httpCode = http.GET();
-    }
-
-    if (_debug)
-        _log("HTTP Code: " + String(httpCode));
+    if (isPost) httpCode = http.POST(payload);
+    else httpCode = http.GET();
 
     String response = "";
+    
+    // Check for Session Expiry in PetKit (usually 401 or specific JSON error, but 401 is standard)
+    if (httpCode == 401) {
+        _log("Session expired. Retrying login...");
+        http.end();
+        if (login()) {
+            // Retry once
+            http.begin(finalUrl);
+            http.addHeader("Accept", "*/*");
+            http.addHeader("X-Api-Version", "12.4.1");
+            http.addHeader("X-Client", "android(15.1;23127PN0CG)");
+            http.addHeader("User-Agent", "okhttp/3.12.11");
+            http.addHeader("X-Session", _session_id); // New session
+            if (isPost && isFormUrlEncoded) http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            
+            if (isPost) httpCode = http.POST(payload);
+            else httpCode = http.GET();
+        }
+    }
+
     if (httpCode > 0)
     {
         response = http.getString();
-        if (_debug)
-        {
-            _log("Response:");
-            JsonDocument doc;
-            if (deserializeJson(doc, response) == DeserializationError::Ok)
-            {
-                serializeJsonPretty(doc, Serial);
-                Serial.println();
-            }
-            else
-            {
-                _log(response); // Print raw response if not valid JSON
-            }
-        }
-
-        // The API wraps successful results in a "result" object. This extracts it.
+        
+        // Extract result wrapper if present
         JsonDocument doc;
         if (deserializeJson(doc, response) == DeserializationError::Ok && doc["result"])
         {
@@ -545,7 +445,6 @@ String PetKitApi::_sendRequest(const String &url, const String &payload, bool is
             http.end();
             return resultStr;
         }
-        // Otherwise, return the full response (e.g., for login)
     }
     else
     {

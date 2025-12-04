@@ -1,16 +1,13 @@
 #ifndef WhiskerApi_h
 #define WhiskerApi_h
+
 #include <Arduino.h>
-
-#include "SmartLitterbox.h" // Include Interface
-
+#include "SmartLitterbox.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <vector>
-#include "time.h"
 
-// Internal Structs
 struct WhiskerPet {
     String id;
     String name;
@@ -27,19 +24,26 @@ struct WhiskerRecord {
     String event_type;
 };
 
-// Inherit from SmartLitterbox
+// New Status Structure
+struct WhiskerStatus {
+    String device_serial;
+    String device_model;
+    time_t timestamp;
+    int litter_level_percent;   // Calculated from ToF sensor
+    int waste_level_percent;    // DFI Level
+    bool is_drawer_full;
+    String robot_status;        // e.g., ROBOT_IDLE, ROBOT_CLEAN
+};
+
 class WhiskerApi : public SmartLitterbox {
 public:
-    WhiskerApi(const char* email, const char* password, const char* timezone = "UTC0");
-
-    // --- SmartLitterbox Interface Implementation ---
-
+    WhiskerApi(const char* email, const char* password, const char* timezone);
+    ~WhiskerApi();
+    // --- Interface Implementation ---
     bool login() override;
-    bool syncTime(const char* ntpServer = "pool.ntp.org", const char* tzInfo = "UTC0") override;
     bool fetchAllData(int limit = 10) override;
     void setDebug(bool enabled) override;
 
-    // Adapter: Convert internal WhiskerPet to Unified SL_Pet
     std::vector<SL_Pet> getUnifiedPets() const override {
         std::vector<SL_Pet> unified;
         for (const auto& p : _pets) {
@@ -52,29 +56,55 @@ public:
         return unified;
     }
 
-    // Adapter: Convert internal WhiskerRecord to Unified SL_Record
     std::vector<SL_Record> getUnifiedRecords() const override {
         std::vector<SL_Record> unified;
         for (const auto& r : _records) {
-            // Only return actual pet visits, ignore machine events like "Drawer Full" for the unified view
-            if (r.pet_name.length() > 0 || r.event_type == "Cat Detected") {
+            if (r.pet_name.length() > 0 || r.event_type == "Pet Weight Recorded") {
                 SL_Record slr;
                 slr.pet_name = r.pet_name.length() > 0 ? r.pet_name : "Unknown Cat";
                 slr.timestamp = r.timestamp;
                 slr.weight_lbs = r.weight_lbs;
-                slr.duration_seconds = 0; // Whisker API doesn't readily provide duration in this endpoint
+                slr.duration_seconds = 0; 
                 slr.action = r.event_type;
                 slr.source_device = r.device_model;
+                slr.PetId = r.pet_id.toInt();
                 unified.push_back(slr);
             }
         }
         return unified;
     }
 
-    // --- Original Accessors ---
-    const std::vector<WhiskerPet>& getPets() const;
-    const std::vector<WhiskerRecord>& getRecords() const;
-    std::vector<WhiskerRecord> getRecordsByPetId(String pet_id) const;
+    // New Unified Status Implementation
+    SL_Status getUnifiedStatus() const override {
+        if (_status_records.empty()) return SL_Status{ApiType::WHISKER,"", "", 0, 0, 0, false, false, "Unknown"};
+        
+        const auto& r = _status_records.front();
+        SL_Status s;
+        s.api_type = ApiType::WHISKER;
+        s.device_name = r.device_serial; // Whisker uses Serial as primary ID often
+        s.device_type = r.device_model;
+        s.timestamp = r.timestamp;
+        s.litter_level_percent = r.litter_level_percent;
+        s.waste_level_percent = r.waste_level_percent;
+        s.is_drawer_full = r.is_drawer_full;
+        
+        // Map common Whisker statuses to text
+        s.status_text = r.robot_status; 
+        if (r.robot_status == "ROBOT_IDLE") s.status_text = "Ready";
+        else if (r.robot_status == "ROBOT_CLEAN") s.status_text = "Cleaning";
+        else if (r.robot_status == "ROBOT_CAT_DETECT") s.status_text = "Cat Detected";
+        
+        s.is_error_state = (r.robot_status.indexOf("FAULT") != -1);
+        
+        return s;
+    }
+
+    const std::vector<WhiskerStatus>& getStatusRecords() const { return _status_records; }
+    
+    WhiskerStatus getLatestStatus() const {
+        if (_status_records.empty()) return WhiskerStatus{};
+        return _status_records.front();
+    }
 
 private:
     const char* _email;
@@ -88,6 +118,7 @@ private:
 
     std::vector<WhiskerPet> _pets;
     std::vector<WhiskerRecord> _records;
+    std::vector<WhiskerStatus> _status_records; 
 
     void _log(const String& msg);
     bool _parseJwtForUserId(const String& token);
