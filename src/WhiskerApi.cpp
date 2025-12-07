@@ -158,9 +158,10 @@ void WhiskerApi::_fetchPets() {
 
     for (JsonObject obj : arr) {
         WhiskerPet p;
-        p.id = obj["petId"].as<String>();
+        p.uuid = obj["petId"].as<String>();
         p.name = obj["name"].as<String>();
         p.weight_lbs = obj["weight"].as<float>();
+        p.id = _simpleHash(p.uuid);
         _pets.push_back(p);
         _log("Found Pet: " + p.name);
     }
@@ -168,7 +169,7 @@ void WhiskerApi::_fetchPets() {
 
 void WhiskerApi::_fetchPetWeightHistory(const WhiskerPet& pet, int limit) {
     String query = "query GetWeightHistory($petId: String!, $limit: Int) { getWeightHistoryByPetId(petId: $petId, limit: $limit) { weight timestamp } }";
-    String vars = "{\"petId\":\"" + pet.id + "\", \"limit\":" + String(limit) + "}";
+    String vars = "{\"petId\":\"" + pet.uuid + "\", \"limit\":" + String(limit) + "}";
 
     String response = _sendGraphQL(API_PET_GRAPHQL, query, vars);
     if (response == "{}") return;
@@ -179,6 +180,7 @@ void WhiskerApi::_fetchPetWeightHistory(const WhiskerPet& pet, int limit) {
 
     for (JsonObject item : history) {
         WhiskerRecord r;
+        r.pet_uuid = pet.uuid;
         r.pet_id = pet.id;
         r.pet_name = pet.name;
         r.event_type = "Pet Weight Recorded"; 
@@ -253,7 +255,7 @@ void WhiskerApi::_fetchRobotsAndCycles(int limit) {
             WhiskerRecord r;
             r.device_serial = serial;
             r.device_model = "Litter-Robot 4";
-            r.pet_id = ""; 
+            r.pet_uuid = ""; 
             r.pet_name = "";
             
             if (val == "robotCycleStatusIdle") r.event_type = "Clean Cycle Complete";

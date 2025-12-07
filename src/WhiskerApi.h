@@ -9,7 +9,8 @@
 #include <vector>
 
 struct WhiskerPet {
-    String id;
+    String uuid;
+    int id;
     String name;
     float weight_lbs;
 };
@@ -17,7 +18,8 @@ struct WhiskerPet {
 struct WhiskerRecord {
     String device_serial;
     String device_model;
-    String pet_id;
+    String pet_uuid;
+    int pet_id;
     String pet_name;
     time_t timestamp;
     float weight_lbs;
@@ -67,12 +69,20 @@ public:
                 slr.duration_seconds = 0; 
                 slr.action = r.event_type;
                 slr.source_device = r.device_model;
-                slr.PetId = r.pet_id.toInt();
+                slr.PetId = r.pet_id;
                 unified.push_back(slr);
             }
         }
         return unified;
     }
+
+    uint32_t _simpleHash(String str) {
+    uint32_t hash = 5381;
+    for (int i = 0; i < str.length(); i++) {
+        hash = ((hash << 5) + hash) + str.charAt(i); /* hash * 33 + c */
+    }
+    return hash;
+}
 
     // New Unified Status Implementation
     SL_Status getUnifiedStatus() const override {
