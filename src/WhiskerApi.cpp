@@ -73,18 +73,23 @@ bool WhiskerApi::login() {
         _id_token = respDoc["AuthenticationResult"]["IdToken"].as<String>();
         _access_token = respDoc["AuthenticationResult"]["AccessToken"].as<String>();
 
-        // Extract User ID (mid) from JWT
+        // Cognito returned tokens. If JWT parse fails, _parseJwtForUserId logs
+        // the specific reason on Serial — we don't need to dump the full body.
         if (_parseJwtForUserId(_id_token)) {
             _log("Login Successful. User ID: " + _user_id);
             return true;
         }
+        if (Serial) {
+            Serial.printf("[WhiskerApi] Cognito auth OK but JWT parse failed. IdToken len=%u\n",
+                (unsigned)_id_token.length());
+        }
+        return false;
     }
 
-    // Unconditional diagnostics — these fire regardless of setDebug() so callers
-    // can see what Cognito returned. Common case: ChallengeName=PASSWORD_VERIFIER,
-    // meaning the app client requires SRP and rejects USER_PASSWORD_AUTH.
+    // No AuthenticationResult — Cognito returned a challenge or error. Dump
+    // everything useful so the caller can diagnose regardless of setDebug().
     if (Serial) {
-        Serial.println("[WhiskerApi] Login failed to produce tokens.");
+        Serial.println("[WhiskerApi] Login did not return AuthenticationResult.");
         Serial.printf("[WhiskerApi]   HTTP status: %d\n", httpCode);
         Serial.printf("[WhiskerApi]   Response length: %u bytes\n", (unsigned)response.length());
         if (jsonErr) {
@@ -114,41 +119,59 @@ bool WhiskerApi::login() {
     return false;
 }
 
-// Helper to decode JWT and get the "mid" (Member ID)
+// Helper to decode JWT and get the "mid" (Member ID).
+// JWT payloads are base64url-encoded (RFC 7515): '+' and '/' become '-' and '_',
+// and trailing '=' padding is typically stripped. mbedtls_base64_decode only
+// accepts standard base64, so we convert before decoding.
 bool WhiskerApi::_parseJwtForUserId(const String& token) {
     int firstDot = token.indexOf('.');
     int secondDot = token.indexOf('.', firstDot + 1);
-    if (firstDot == -1 || secondDot == -1) return false;
+    if (firstDot == -1 || secondDot == -1) {
+        if (Serial) Serial.printf("[WhiskerApi] JWT malformed: dots not found (token len=%u)\n", (unsigned)token.length());
+        return false;
+    }
 
     String payload = token.substring(firstDot + 1, secondDot);
-    
+
+    // base64url -> base64
+    payload.replace('-', '+');
+    payload.replace('_', '/');
+    // Pad to multiple of 4
+    while (payload.length() % 4 != 0) payload += '=';
+
     size_t len = payload.length();
     size_t olen = 0;
-    
+
     unsigned char* decoded = (unsigned char*)malloc(len + 1);
     if (!decoded) {
-        _log("Memory allocation failed for JWT decode");
+        if (Serial) Serial.println("[WhiskerApi] JWT decode: malloc failed");
         return false;
     }
 
     int ret = mbedtls_base64_decode(decoded, len, &olen, (unsigned char*)payload.c_str(), len);
-    
+
     if (ret != 0) {
+        if (Serial) Serial.printf("[WhiskerApi] JWT base64 decode failed: mbedtls err -0x%04X (payload len=%u)\n", -ret, (unsigned)len);
         free(decoded);
         return false;
     }
 
     String decode_output((char*)decoded, olen);
-    free(decoded); 
+    free(decoded);
 
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, decode_output);
-    
-    if (!error && doc["mid"]) {
-        _user_id = doc["mid"].as<String>();
-        return true;
+
+    if (error) {
+        if (Serial) Serial.printf("[WhiskerApi] JWT JSON parse failed: %s\n", error.c_str());
+        return false;
     }
-    return false;
+    if (!doc["mid"]) {
+        if (Serial) Serial.println("[WhiskerApi] JWT decoded but 'mid' claim is missing");
+        return false;
+    }
+    _user_id = doc["mid"].as<String>();
+    return true;
 }
 
 // --- Main Data Fetch ---
