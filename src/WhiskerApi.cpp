@@ -5,7 +5,11 @@
 const char* COGNITO_ENDPOINT = "https://cognito-idp.us-east-1.amazonaws.com/";
 const char* WHISKER_CLIENT_ID = "4552ujeu3aic90nf8qn53levmn"; // Public App Client ID
 const char* API_LR4_GRAPHQL = "https://lr4.iothings.site/graphql";
-const char* API_PET_GRAPHQL = "https://pet-profile.iothings.site/graphql";
+const char* API_PET_GRAPHQL = "https://pet-profile.iothings.site/graphql/";
+
+// Required since 2026-04-09: Whisker's backend returns 403 Forbidden to requests
+// without an identifying User-Agent. Mirrors pylitterbot's format for compatibility.
+const char* WHISKER_USER_AGENT = "pylitterbot/2025.3.2";
 
 WhiskerApi::WhiskerApi(const char* email, const char* password, const char* timezone) 
     : _email(email), _password(password), _timezone(timezone), _debug(false) {}
@@ -47,6 +51,7 @@ bool WhiskerApi::login() {
     http.begin(COGNITO_ENDPOINT);
     http.addHeader("Content-Type", "application/x-amz-json-1.1");
     http.addHeader("X-Amz-Target", "AWSCognitoIdentityProviderService.InitiateAuth");
+    http.addHeader("User-Agent", WHISKER_USER_AGENT);
     http.setTimeout(10000); // 10s timeout
 
     int httpCode = http.POST(payload);
@@ -282,6 +287,7 @@ String WhiskerApi::_sendRequest(const char* url, const char* method, const Strin
 
     http.begin(url);
     http.addHeader("Content-Type", contentType);
+    http.addHeader("User-Agent", WHISKER_USER_AGENT);
     if (_id_token.length() > 0) {
         http.addHeader("Authorization", "Bearer " + _id_token);
     }
@@ -293,14 +299,15 @@ String WhiskerApi::_sendRequest(const char* url, const char* method, const Strin
     // Check for Token Expiry (401)
     if (httpCode == 401) {
         _log("Token expired. Attempting re-login...");
-        http.end(); 
-        
+        http.end();
+
         if (login()) {
             _log("Re-login successful. Retrying request...");
             http.begin(url);
             http.addHeader("Content-Type", contentType);
+            http.addHeader("User-Agent", WHISKER_USER_AGENT);
             http.addHeader("Authorization", "Bearer " + _id_token);
-            
+
             if (String(method) == "POST") httpCode = http.POST(payload);
             else httpCode = http.GET();
         } else {
