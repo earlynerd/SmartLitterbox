@@ -67,20 +67,50 @@ bool WhiskerApi::login() {
     http.end();
 
     JsonDocument respDoc;
-    deserializeJson(respDoc, response);
+    DeserializationError jsonErr = deserializeJson(respDoc, response);
 
     if (respDoc["AuthenticationResult"]) {
         _id_token = respDoc["AuthenticationResult"]["IdToken"].as<String>();
         _access_token = respDoc["AuthenticationResult"]["AccessToken"].as<String>();
-        
+
         // Extract User ID (mid) from JWT
         if (_parseJwtForUserId(_id_token)) {
             _log("Login Successful. User ID: " + _user_id);
             return true;
         }
     }
-    
-    _log("Failed to parse tokens.");
+
+    // Unconditional diagnostics — these fire regardless of setDebug() so callers
+    // can see what Cognito returned. Common case: ChallengeName=PASSWORD_VERIFIER,
+    // meaning the app client requires SRP and rejects USER_PASSWORD_AUTH.
+    if (Serial) {
+        Serial.println("[WhiskerApi] Login failed to produce tokens.");
+        Serial.printf("[WhiskerApi]   HTTP status: %d\n", httpCode);
+        Serial.printf("[WhiskerApi]   Response length: %u bytes\n", (unsigned)response.length());
+        if (jsonErr) {
+            Serial.printf("[WhiskerApi]   JSON parse error: %s\n", jsonErr.c_str());
+        }
+        if (respDoc["ChallengeName"]) {
+            Serial.printf("[WhiskerApi]   Cognito challenge: %s\n",
+                respDoc["ChallengeName"].as<const char*>());
+        }
+        if (respDoc["__type"]) {
+            Serial.printf("[WhiskerApi]   Error type: %s\n",
+                respDoc["__type"].as<const char*>());
+        }
+        if (respDoc["message"]) {
+            Serial.printf("[WhiskerApi]   Error message: %s\n",
+                respDoc["message"].as<const char*>());
+        }
+        Serial.print("[WhiskerApi]   Body: ");
+        if (response.length() > 512) {
+            Serial.print(response.substring(0, 512));
+            Serial.println(" ...[truncated]");
+        } else {
+            Serial.println(response);
+        }
+    }
+
     return false;
 }
 
